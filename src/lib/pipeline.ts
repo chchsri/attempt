@@ -44,10 +44,12 @@ export async function generate(input: GenerateInput): Promise<GenerateResult> {
     return { status: "error", attempts: attempt };
   }
 
-  // Kick off the next stage and return.
-  void input.advanceToNextStage().catch(() => {
-    /* ignored */
-  });
+  // Hand off to the next stage; a failure here is a pipeline failure.
+  try {
+    await input.advanceToNextStage();
+  } catch {
+    return { status: "error", attempts: attempt };
+  }
 
   return { status: "ok", attempts: attempt };
 }
