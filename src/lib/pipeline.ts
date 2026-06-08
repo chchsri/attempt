@@ -1,5 +1,10 @@
 import { extractJson } from "./extract-json";
-import { mockStream, type MockBehavior, type MockState } from "./anthropic-mock";
+import {
+  mockStream,
+  type MockBehavior,
+  type MockState,
+  type TransientError,
+} from "./anthropic-mock";
 
 export interface GenerateInput {
   /** Drives the mock streaming client (see anthropic-mock.ts). */
@@ -15,23 +20,56 @@ export interface GenerateResult {
   attempts: number;
 }
 
-const MAX_REVISIONS = 3;
+export const MAX_REVISIONS = 3;
+
+// Maximum times we will call the streaming API before giving up.
+const MAX_STREAM_ATTEMPTS = 5;
+
+/**
+ * Returns true for errors that are safe to retry:
+ *   - 429 rate-limit (transient server pressure)
+ *   - missing JSON fence (stream was cut off mid-response)
+ */
+function isRetryableStreamError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if ((err as TransientError).status === 429) return true;
+  if (err.message === "No fenced JSON block found") return true;
+  return false;
+}
+
+/**
+ * Calls the streaming client and validates the JSON fence.
+ * Retries transparently on transient 429s and truncated streams.
+ * Returns the raw response text on success, or null if all attempts fail.
+ */
+async function fetchDraft(
+  behavior: MockBehavior,
+  state: MockState,
+): Promise<string | null> {
+  for (let attempt = 0; attempt < MAX_STREAM_ATTEMPTS; attempt++) {
+    try {
+      const raw = await mockStream(behavior, state);
+      extractJson(raw); // throws "No fenced JSON block found" on truncation
+      return raw;
+    } catch (err) {
+      const isLastAttempt = attempt === MAX_STREAM_ATTEMPTS - 1;
+      if (!isRetryableStreamError(err) || isLastAttempt) return null;
+    }
+  }
+  return null;
+}
 
 /**
  * Runs one content-generation pass: stream a draft, extract it, revise until it
  * passes review, then hand off to the next stage.
- *
- * This is a faithful (stripped-down) reproduction of the real pipeline — and it
- * ships with three real bugs from that pipeline. Your job is to fix them so the
- * test suite passes. See the README for the symptoms. (Do not edit the tests.)
  */
 export async function generate(input: GenerateInput): Promise<GenerateResult> {
   const state: MockState = { calls: 0 };
 
-  // The model call can fail transiently (rate limits) or return a truncated
-  // stream. Right now a single hiccup takes down the whole run.
-  const text = await mockStream(input.behavior, state);
-  extractJson(text);
+  const draft = await fetchDraft(input.behavior, state);
+  if (draft === null) {
+    return { status: "error", attempts: 0 };
+  }
 
   // Revise until the draft passes review, capped at MAX_REVISIONS iterations.
   let attempt = 0;
@@ -53,5 +91,3 @@ export async function generate(input: GenerateInput): Promise<GenerateResult> {
 
   return { status: "ok", attempts: attempt };
 }
-
-export { MAX_REVISIONS };
