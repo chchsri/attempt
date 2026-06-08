@@ -33,10 +33,15 @@ export async function generate(input: GenerateInput): Promise<GenerateResult> {
   const text = await mockStream(input.behavior, state);
   extractJson(text);
 
-  // Revise until the draft passes review.
+  // Revise until the draft passes review, capped at MAX_REVISIONS iterations.
   let attempt = 0;
-  while (!input.reviewPasses(attempt) && attempt < 50) {
+  while (!input.reviewPasses(attempt) && attempt < MAX_REVISIONS) {
     attempt += 1;
+  }
+
+  // If the revision cap was hit without passing, the run has failed.
+  if (!input.reviewPasses(attempt)) {
+    return { status: "error", attempts: attempt };
   }
 
   // Kick off the next stage and return.
